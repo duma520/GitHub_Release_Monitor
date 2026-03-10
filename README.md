@@ -16,6 +16,8 @@
 
 <img width="1447" height="639" alt="image" src="https://github.com/user-attachments/assets/b0f0af7c-ac95-4e67-8376-66c61db49f03" />
 
+<img width="1016" height="639" alt="image" src="https://github.com/user-attachments/assets/fecfa0d9-3e1a-4f33-b052-7dd4cfeb930f" />
+
 ----
 # GitHub Releases 监控程序 完全使用指南
 

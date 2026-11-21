@@ -159,7 +159,7 @@
 
 4. **保存Token**
    - **复制并保存好显示的token！**（关掉页面后就看不到了）
-   - 格式类似：`ghp_xxxxxxxxxxxxxxxxxxxx`
+   - 格式类似：`ghp_***已脱敏***`
 
 ### 第二章：安装软件
 
@@ -586,7 +586,7 @@ Tokens (classic)
 
 **步骤3：复制Token**
 - 生成后立即复制（关掉页面就看不到了）
-- Token格式：`ghp_xxxxxxxxxxxxxxxxxxxx`
+- Token格式：`ghp_***已脱敏***`
 
 #### 11.3 在软件中配置Token
 

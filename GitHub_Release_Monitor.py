@@ -46,8 +46,8 @@ from PySide6.QtGui import (
 # ==================== 项目信息元数据 ====================
 class ProjectInfo:
     """项目信息元数据（集中管理所有项目相关信息）"""
-    VERSION = "1.1.15"
-    BUILD_DATE = "2026-03-10"
+    VERSION = "1.1.17"
+    BUILD_DATE = "2026-03-11"
     AUTHOR = "杜玛"
     LICENSE = "GNU Affero General Public License v3.0"
     COPYRIGHT = "© 永久 杜玛"
@@ -686,6 +686,18 @@ class DatabaseManager:
                     UNIQUE(repo_id, version)
                 )
             """)
+        
+            # ===== 创建更新记录表 =====
+            self.connection.execute("""
+                CREATE TABLE IF NOT EXISTS update_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_id INTEGER NOT NULL,
+                    old_version TEXT,
+                    new_version TEXT NOT NULL,
+                    detected_at TEXT NOT NULL,
+                    FOREIGN KEY (repo_id) REFERENCES repositories(id) ON DELETE CASCADE
+                )
+            """)
             
             # 创建索引
             self.connection.execute("""
@@ -695,6 +707,11 @@ class DatabaseManager:
             self.connection.execute("""
                 CREATE INDEX IF NOT EXISTS idx_releases_published_at 
                 ON releases(published_at)
+            """)
+            # ===== 更新记录表索引 =====
+            self.connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_update_records_detected_at 
+                ON update_records(detected_at)
             """)
             
             self.connection.commit()
@@ -1017,14 +1034,15 @@ class CheckUpdatesThread(QThread):
     finished = Signal(list)  # 更新列表
     error = Signal(str)  # 错误信息
     
-    def __init__(self, db: DatabaseManager, config: AppConfig):
+    def __init__(self, db: DatabaseManager, config: AppConfig, token: str = None):
         super().__init__()
-        self.db_path = db.db_path  # 只保存数据库路径，不保存连接
+        self.db_path = db.db_path  
         self.user_name = db.user_name
         self.config = config
-        self.client = GitHubClient(config.proxy_host, config.proxy_port, config.use_proxy)
+        self.token = token
+        self.client = GitHubClient(config.proxy_host, config.proxy_port, config.use_proxy, token)
         self._is_running = True
-        self.thread_db = None  # 线程本地数据库连接
+        self.thread_db = None  
     
     def get_thread_db(self):
         """获取当前线程的数据库连接"""
@@ -2717,7 +2735,25 @@ class MainWindow(QMainWindow):
         self.status_bar = self.statusBar()
         self.status_label = QLabel("就绪")
         self.status_bar.addWidget(self.status_label)
-    
+
+        # ========== 添加更新通知区域 ==========
+        self.update_notification = QLabel()
+        self.update_notification.setStyleSheet("""
+            QLabel {
+                background-color: #e74c3c;
+                color: white;
+                border-radius: 10px;
+                padding: 2px 8px;
+                margin: 2px;
+                font-weight: bold;
+            }
+        """)
+        self.update_notification.setVisible(False)
+        self.status_bar.addPermanentWidget(self.update_notification)
+
+        # 添加点击查看更新记录的事件
+        self.update_notification.mousePressEvent = lambda e: self.tab_widget.setCurrentIndex(1)
+
         # 在状态栏右侧添加永久性的Token状态提示
         self.status_token_label = QLabel()
         self.status_bar.addPermanentWidget(self.status_token_label)
@@ -2896,45 +2932,51 @@ class MainWindow(QMainWindow):
     def load_updates(self):
         """加载更新记录"""
         try:
-            # 获取最近30天的更新
-            thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
-            
+            # ===== 修改：从 update_records 表获取数据 =====
             cursor = self.db.execute("""
-                SELECT r.full_name, rel.* 
-                FROM releases rel
-                JOIN repositories r ON rel.repo_id = r.id
-                WHERE rel.published_at > ?
-                ORDER BY rel.published_at DESC
+                SELECT ur.*, r.full_name, r.name
+                FROM update_records ur
+                JOIN repositories r ON ur.repo_id = r.id
+                ORDER BY ur.detected_at DESC
                 LIMIT 100
-            """, (thirty_days_ago,))
+            """)
             
             updates = cursor.fetchall()
             
             self.update_table.setRowCount(len(updates))
             
             for i, update in enumerate(updates):
-                # 时间
-                pub_time = datetime.fromisoformat(update['published_at']).strftime("%Y-%m-%d %H:%M")
-                time_item = QTableWidgetItem(pub_time)
+                # 检测时间
+                detect_time = datetime.fromisoformat(update['detected_at']).strftime("%Y-%m-%d %H:%M")
+                time_item = QTableWidgetItem(detect_time)
                 self.update_table.setItem(i, 0, time_item)
                 
                 # 仓库
                 repo_item = QTableWidgetItem(update['full_name'])
                 self.update_table.setItem(i, 1, repo_item)
                 
-                # 版本
-                old_version = "未知"  # 这里可以从其他地方获取旧版本
-                old_item = QTableWidgetItem(old_version)
+                # 旧版本
+                old_item = QTableWidgetItem(update['old_version'] or "无")
                 self.update_table.setItem(i, 2, old_item)
                 
-                new_item = QTableWidgetItem(update['version'])
+                # 新版本
+                new_item = QTableWidgetItem(update['new_version'])
                 self.update_table.setItem(i, 3, new_item)
                 
-                # Release说明
-                body = update['body'] or ""
-                if len(body) > 100:
-                    body = body[:100] + "..."
-                body_item = QTableWidgetItem(body)
+                # 获取该版本的release说明
+                release_cursor = self.db.execute(
+                    "SELECT body, url FROM releases WHERE repo_id = ? AND version = ?",
+                    (update['repo_id'], update['new_version'])
+                )
+                release = release_cursor.fetchone()
+                
+                if release and release['body']:
+                    body = release['body']
+                    if len(body) > 100:
+                        body = body[:100] + "..."
+                    body_item = QTableWidgetItem(body)
+                else:
+                    body_item = QTableWidgetItem("")
                 self.update_table.setItem(i, 4, body_item)
                 
                 # 操作按钮
@@ -2942,16 +2984,21 @@ class MainWindow(QMainWindow):
                 btn_layout = QHBoxLayout(btn_widget)
                 btn_layout.setContentsMargins(2, 2, 2, 2)
                 
-                open_btn = QPushButton("打开")
-                open_btn.clicked.connect(
-                    lambda checked, url=update['url']: self.open_url(url)
-                )
-                btn_layout.addWidget(open_btn)
+                if release and release['url']:
+                    open_btn = QPushButton("打开")
+                    # 使用lambda的默认参数来捕获当前值
+                    open_btn.clicked.connect(
+                        lambda checked, url=release['url']: self.open_url(url)
+                    )
+                    btn_layout.addWidget(open_btn)
                 
                 self.update_table.setCellWidget(i, 5, btn_widget)
             
+            # ===== 修改结束 =====
+            
         except Exception as e:
             self.log(f"加载更新记录失败: {e}")
+            print(f"加载更新记录详细错误: {e}")  # 调试用
     
     def add_repo(self):
         """添加仓库"""
@@ -3118,7 +3165,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         
-        self.check_thread = CheckUpdatesThread(self.db, self.config)
+        self.check_thread = CheckUpdatesThread(self.db, self.config, self.github_token)
         self.check_thread.progress.connect(self.update_progress)
         self.check_thread.log.connect(self.log)
         self.check_thread.finished.connect(self.on_check_finished)
@@ -3143,26 +3190,66 @@ class MainWindow(QMainWindow):
         self.check_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
-        self.status_label.setText("检查完成")
         
         if updates:
+            # ===== 新增：保存更新记录到数据库 =====
+            now = datetime.now().isoformat()
+            for update in updates:
+                try:
+                    # 保存更新记录
+                    self.db.execute("""
+                        INSERT INTO update_records 
+                        (repo_id, old_version, new_version, detected_at)
+                        VALUES (?, ?, ?, ?)
+                    """, (
+                        update['repo']['id'],
+                        update['old_version'],
+                        update['new_version'],
+                        now
+                    ))
+                    self.log(f"记录更新: {update['repo']['name']} {update['old_version']} -> {update['new_version']}")
+                except Exception as e:
+                    self.log(f"保存更新记录失败: {e}")
+            self.db.commit()
+            # ===== 新增结束 =====
+            
             self.updates = updates
             msg = f"发现 {len(updates)} 个仓库有更新"
             self.log(msg)
-            QMessageBox.information(self, "更新通知", msg)
-            self.load_updates()
+            
+            # 修改：从弹窗改为状态栏显示
+            self.status_label.setText(msg)
+            
+            # 闪烁状态栏提示用户
+            self.status_bar.showMessage(msg, 5000)  # 显示5秒
+            
+            # 可以在状态栏添加一个带颜色的提示
+            self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+            
+            # 更新通知区域
+            self.update_notification.setText(f"🔔 {len(updates)} 个更新")
+            self.update_notification.setVisible(True)
+            
+            # 3秒后恢复普通样式
+            QTimer.singleShot(3000, lambda: self.status_label.setStyleSheet(""))
+            
+            self.load_updates()  # 这会重新加载更新记录
+            
+            # 切换到更新记录标签页
+            self.tab_widget.setCurrentIndex(1)
         else:
-            self.log("没有发现更新")
+            msg = "没有发现更新"
+            self.log(msg)
+            self.status_label.setText(msg)
+            self.status_bar.showMessage(msg, 3000)
+            self.status_label.setStyleSheet("")
+            self.update_notification.setVisible(False)  # 隐藏通知区域
         
         # 自动备份
         self.create_auto_backup()
         
         # 刷新列表（更新版本信息）
         self.load_repos()  # 确保刷新以显示最新版本
-    
-        # 切换到更新记录标签页（如果有更新）
-        if updates:
-            self.tab_widget.setCurrentIndex(1)  # 切换到更新记录标签页
 
     def on_check_error(self, error: str):
         """检查错误"""
